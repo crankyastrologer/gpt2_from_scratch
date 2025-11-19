@@ -73,7 +73,7 @@ int main(){
     kernel0_embedding_layer<<<total_tokens, BLOCK_SIZE>>>(
         d_input_ids, d_token_embed_matrix, d_pos_embed_matrix, 
         d_model_output, seq_len, n_embed
-    );
+    );cudaDeviceSynchronize();
     cudaCheckErrors("Layer 0 Embedding failed");
 float *d_layer_Wq;
         cudaMalloc(&d_layer_Wq,n_embed*n_embed*sizeof(float));
@@ -110,7 +110,7 @@ float *d_layer_Wq;
         // --- LAUNCH KERNEL 2: LAYER NORM (Pre-Attention) ---
         kernel1_normalization_layer<<<total_tokens, BLOCK_SIZE>>>(
             d_model_output, d_ln_gamma, d_ln_beta, n_embed, 1e-5f
-        );
+        );cudaDeviceSynchronize();
         
         cudaCheckErrors("Layer 1 (Pre-Attention) LayerNorm failed");
 
@@ -130,7 +130,7 @@ float *d_layer_Wq;
             d_Q,
             n_embed
         
-        );
+        );cudaDeviceSynchronize();
         cublasSgemm(cublas_handle,
             CUBLAS_OP_N, CUBLAS_OP_N,
             n_embed, total_tokens, n_embed,
@@ -142,7 +142,7 @@ float *d_layer_Wq;
             &beta,
             d_K,           // K Result buffer
             n_embed
-        );
+        );cudaDeviceSynchronize();
 
         // V
         cublasSgemm(cublas_handle,
@@ -156,7 +156,7 @@ float *d_layer_Wq;
             &beta,
             d_V,           // V Result buffer
             n_embed
-        );
+        );cudaDeviceSynchronize();
         cublasSgemm(cublas_handle,
             CUBLAS_OP_T, CUBLAS_OP_N,
             total_tokens,  // n
@@ -170,7 +170,7 @@ float *d_layer_Wq;
             &beta,
             d_scores,      // C
             total_tokens   // ldc
-        );
+        );cudaDeviceSynchronize();
         // TODO: Reshape for Multi-Head
         // TODO: Launch batched cuBLAS GEMM for Q*K^T (Scores)
        
@@ -178,7 +178,7 @@ float *d_layer_Wq;
         // (This assumes a 'd_scores' buffer was calculated and has shape [B*H*S, S])
         // int grid_size_softmax = total_tokens * N_HEAD;
         // fused_masked_softmax<<<grid_size_softmax, BLOCK_SIZE>>>(d_scores, seq_len);
-        kernel2_softmax_layer<<<total_tokens, BLOCK_SIZE>>>(d_scores,total_tokens);
+        kernel2_softmax_layer<<<total_tokens, BLOCK_SIZE>>>(d_scores,total_tokens);cudaDeviceSynchronize();
         // TODO: Launch batched cuBLAS GEMM for Scores * V
         // TODO: Reshape back from Multi-Head
         // TODO: Launch cuBLAS GEMM for final output projection
@@ -195,7 +195,7 @@ float *d_layer_Wq;
             &beta,
             d_attn_output, // Result
             n_embed        // ldc
-        );
+        );cudaDeviceSynchronize();
         
         // 4. Final Projection (Output Weights)
         // Output = Attn_Output * W_o
@@ -210,12 +210,12 @@ float *d_layer_Wq;
             &beta,
             d_model_output,// Write back to main buffer (or a temp one)
             n_embed
-        );
+        );cudaDeviceSynchronize();
         // --- LAUNCH KERNEL 4: RESIDUAL ADD (Attention) ---
        int grid_size_embed = (total_elements_embed + BLOCK_SIZE - 1) / BLOCK_SIZE;
         kernel3_add_vector_layer<<<grid_size_embed, BLOCK_SIZE>>>(
             d_residual_buffer, d_model_output, d_model_output, total_elements_embed
-        );
+        );cudaDeviceSynchronize();
         cudaCheckErrors("Layer 4 (Residual 1) failed");
 
         // --- FFN BLOCK ---
@@ -226,7 +226,7 @@ float *d_layer_Wq;
         // --- LAUNCH KERNEL 2: LAYER NORM (Pre-FFN) ---
         kernel1_normalization_layer<<<total_tokens, BLOCK_SIZE>>>(
             d_model_output, d_ln_gamma, d_ln_beta, n_embed, 1e-5f
-        );
+        );cudaDeviceSynchronize();
         cudaCheckErrors("Layer 1 (Pre-FFN) LayerNorm failed");
         
         // TODO: Launch cuBLAS GEMM for FFN Expand (d_model_output -> d_ffn_hidden)
@@ -241,7 +241,7 @@ float *d_layer_Wq;
             &beta,
             ffh,
             FFN_DIM
-        );
+        );cudaDeviceSynchronize();
         
         // --- LAUNCH KERNEL 5: GELU ---
         // (This assumes d_ffn_hidden is [B*S, FFN_DIM])
@@ -261,11 +261,11 @@ float *d_layer_Wq;
             &beta,
             d_model_output, // Write back to main buffer
             n_embed
-        );
+        );cudaDeviceSynchronize();
         // --- LAUNCH KERNEL 4: RESIDUAL ADD (FFN) ---
         kernel3_add_vector_layer<<<(total_elements_embed + 255) / 256, BLOCK_SIZE>>>(
             d_residual_buffer, d_model_output, d_model_output, total_elements_embed
-        );
+        );cudaDeviceSynchronize();
         cudaCheckErrors("Layer 4 (Residual 2) failed");
     }
     
@@ -275,7 +275,7 @@ float *d_layer_Wq;
     // --- LAUNCH KERNEL 2: FINAL LAYER NORM ---
     kernel1_normalization_layer<<<total_tokens, BLOCK_SIZE>>>(
         d_model_output, d_ln_gamma, d_ln_beta, n_embed, 1e-5f
-    );
+    );cudaDeviceSynchronize();
     cudaCheckErrors("Final LayerNorm failed");
     
     // --- LAUNCH FINAL GEMM (Unembedding) ---
@@ -291,7 +291,7 @@ float *d_layer_Wq;
         &beta,
         d_logits,
         VOCAB_SIZE
-    );
+    );cudaDeviceSynchronize();
     // --- 6. Copy Results Back & Cleanup ---
     printf("Forward pass complete. Freeing memory...\n");
 
