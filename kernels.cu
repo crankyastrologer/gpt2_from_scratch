@@ -5,10 +5,7 @@ __global__ void kernel0_embedding_layer(const long* input_ids,const float* vecto
     for(int i = id;i<n_embd;i+=blockDim.x)
     {
     output_token[idx*n_embd+i] = position_token[token_pos*n_embd+i]+vector_token[input_ids[idx]*n_embd+i];
-
     }
-
-
 }
 
 __global__ void kernel1_normalization_layer(float* input_embd,const float* gamma, const float* beta,int n_embed,float epsilon){
@@ -146,3 +143,4 @@ __global__ void kernel4_gelu_activation_layer(float*a,const size_t N)
         a[i] = 0.5 * x * (1.0 + tanhf(0.79788456 * (x + 0.044715 * x * x * x)));
     }
 }
+
