@@ -144,3 +144,23 @@ __global__ void kernel4_gelu_activation_layer(float*a,const size_t N)
     }
 }
 
+__global__ void transpose_kernel_layer(float* in,float* out,int w,int h)
+{
+    __shared__ float tile[32][33];
+    int x = threadIdx.x+blockIdx.x*blockDim.x;
+    int y = threadIdx.y+blockIdx.y*blockDim.y;
+    if(x<w&&y<h)
+    {
+        tile[threadIdx.x][threadIdx.y]=in[y*w+x];
+        
+    }
+    __syncthreads();
+    x= blockIdx.y*blockDim.x+threadIdx.x;
+    y = blockDim.y*blockIdx.x + threadIdx.y;
+    if(x<h&&y<w)
+        {out[y*h+x] = tile[threadIdx.y][threadIdx.x];}
+
+    
+
+
+}
