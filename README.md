@@ -11,7 +11,7 @@ This will also serve as documentation where i will high light what each variable
 In the I hope i will understand what might be one of the most imp invention for the next few decades work
 
 # Brief about parallelism and efficent cuda operations 
-So, as we all know GPU is used for it's unmatched parallel processing capacity, if your process requires a bunch of comparitively simple operations that can be done without affecting each other ie parallely, GPU is your best bet. But that too comes with it's caveats. Without going into too much details basically gpu can't command all the threads simuntaneously ie at one clock or cycle the SM(Streaming Multiprocessor) can only allocate task to 1 warp usually around 32 threads and then these threads take their sweet time to complete their tasks meanwhile SM allocates tasks to other warps. so it is more like how async work in python or javascript if replace SM with a thread and warps with IO operations. So we have to make sure SM always have threads to allocate so we should always try to intialize atleast as many threads as are present in a gpu ideally much more if it helps our tasks.
+So, as we all know GPU is used for it's unmatched parallel processing capacity, if your process requires a bunch of comparitively simple operations that can be done without affecting each other ie parallely, GPU is your best bet. But that too comes with it's caveats. Without going into too much details basically gpu can't command all the threads simuntaneously ie at one clock or in one cycle the SM(Streaming Multiprocessor) can only allocate task to 1 warp usually around 32 threads and then these threads take their sweet time to complete their tasks meanwhile SM allocates tasks to other warps. so it is more like how async work in python or javascript if replace SM with a thread and warps with IO operations. So we have to make sure SM always have threads to allocate so we should always try to intialize atleast as many threads as are present in a gpu ideally much more if it helps our tasks.
 
 Second thing is latency of different operations. Not all operations take the same amount of time and one of the most expensive operations is memory calls which could be many times slower than arithmatic operations but the thread can only work on the things that are present in the cache, So we necessarily needs to carry out memory operations to get the data in cache for nearly every operation. Hence, we need to minimize our calls to the memory. Thankfully GPU helps us in this task basically as we discussed earlier all threads in a warp carry out the same instruction that also includes reading from memory. So for eg if threads need the values from the memory in a contiguous fashion( for eg if thread 0 needs 0th element from from an array in memory and thread 1 needs 1st element) these gets clubbed into one large memory request so instead of N memory request each with some latency attached we just need 1 request drastically reducing time taken
 
@@ -141,3 +141,29 @@ __global__ void kernel4_gelu_activation_layer(float*a,const size_t N)
 }
 ```
 This layer is similar to the add vector layer but instead of adding 2 vectors we loop over the vector and apply Gelu activation function to each element of the matrix
+
+```
+__global__ void transpose_kernel_layer(float* in,float* out,int w,int h)
+{
+    __shared__ float tile[32][33];
+    int x = threadIdx.x+blockIdx.x*blockDim.x;
+    int y = threadIdx.y+blockIdx.y*blockDim.y;
+    if(x<w&&y<h)
+    {
+        tile[threadIdx.x][threadIdx.y]=in[y*w+x];
+        
+    }
+    __syncthreads();
+    x= blockIdx.y*blockDim.x+threadIdx.x;
+    y = blockDim.y*blockIdx.x + threadIdx.y;
+    if(x<h&&y<w)
+        {out[y*h+x] = tile[threadIdx.y][threadIdx.x];}
+
+}
+```
+This function is a little tricky because the naive version of this is very simple just a simple copy using threads. But the performace will be horrible due to memory coalacing. for example in a naive function each threads copies it's own element to the output matrix here the calls for each thread gets combined into one memory request as the data they are requesting is sequential, But when we paste this in the new matrix column wise for each column write request a new memory request is required as all writes are not sequential here there will be a large memory bottle neck which massively slow down the whole process for more clarity check this nvidia blog [Efficent Matrix Transpose](https://developer.nvidia.com/blog/efficient-matrix-transpose-cuda-cc/).<br>
+
+So to allievate this we use shared memory. We can use threads to store the data and basically transverse over this shared memory in a non contiguous manner. It might look tricky at first glance I will recommend dry running this code on pen and paper for a small matrix let 6X6 with a 3X3 block and it will become much clearer.<br>
+
+One other thing is in shared memory matrix you will se we have initalized the memory with [32][33] it is to minimize bank conflicts. To go in more details in gpu the memory is stored in banks imagine it like a huge library with different sections for different genres each managed by a different librarien. Now to get a book you would have to the correct librarian, like that here each number in a matrix is given to the bank and there are 32 banks so this process works in round robin fashion so first no goes to first bank and second to second bank so and and the 33rd no goes to the first bank. So here lies the issue if we each thread needs a different row of the same column the will all hit the bank at once basically it would be like everyone asking form the librarian managing history section to get the book for differnt eras of history, a queue will form as librarian can only fetch one book at a time. So we add this offset now the rows of a same column will offset hence all threads will hit different banks.
+

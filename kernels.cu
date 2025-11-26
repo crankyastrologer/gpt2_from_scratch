@@ -160,7 +160,4 @@ __global__ void transpose_kernel_layer(float* in,float* out,int w,int h)
     if(x<h&&y<w)
         {out[y*h+x] = tile[threadIdx.y][threadIdx.x];}
 
-    
-
-
 }
