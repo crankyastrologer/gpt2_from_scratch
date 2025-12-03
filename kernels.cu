@@ -161,3 +161,25 @@ __global__ void transpose_kernel_layer(float* in,float* out,int w,int h)
         {out[y*h+x] = tile[threadIdx.y][threadIdx.x];}
 
 }
+
+__global__ void kernel_transpose_split_heads_layer(    const float* in,
+    float* out,
+const int seq_len,
+const int n_heads,
+const int head_dim)
+{
+ int token_idx = blockIdx.x;
+ if(token_idx>=seq_len)return;
+ int tid = threadIdx.x;
+ int total_dim = n_heads*head_dim;
+ for(int i = tid;i<total_dim;i+=blockDim.x)
+ {
+    int head_idx = i/head_dim;
+    int dim_idx = i%head_dim;
+    int input_idx = token_idx*total_dim+i;
+    float val = in[input_idx];
+    int output_idx = (head_idx*seq_len*head_dim)+(token_idx*head_dim)+dim_idx;
+    out[output_idx]=val;
+
+ }
+}

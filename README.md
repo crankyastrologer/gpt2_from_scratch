@@ -40,7 +40,7 @@ Hence due to this we intialize a grid of n blocks each with m no of threads.<br>
 This section will have explanation for each kernel i have used and why they are necessary 
 let's start in the order i created them 
 
-```
+```c
 __global__ void kernel0_embedding_layer(const long* input_ids,const float* vector_token, const float* position_token, float* output_token,const int input_lenght,const int n_embd){
     int idx = blockIdx.x;
     int id = threadIdx.x;
@@ -61,7 +61,7 @@ So to follow those principles we are doing all these things.
 1. first we are intializing 1024 blocks each with 256 threads so about 262144 threads.(blocks can be seen as a group of threads that have a shared memory it resides on the same die is cache but we can choose what goes here ) <br>
 2. So basically what happens is this code runs on all threads of a warp at the same time and as you can see from the for loop each threads call to memory is linked to the thread id and is offset by 1 so it is basically a contigous call and will work as single memory request.<br>
 
-```
+```c
 __global__ void kernel1_normalization_layer(float* input_embd,const float* gamma, const float* beta,int n_embed,float epsilon){
     __shared__ float sh[256];
     int idx = blockIdx.x;
@@ -117,7 +117,7 @@ for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
  2. **Calculating the variance**: Variance is calculated in a similar fashion first subtract mean from indivdual array elements and then square them before finally using parallel reduction to add them altogether.
  3. **Normalising the input**: Here we simply normalize our inputs by removing mean and dividing by standard diviation(epsilon is added to make sure there are no divide by zero erros if variance is 0 for some reason).
 
-``` 
+``` c
 __global__ void kernel3_add_vector_layer(const float* a,const float* b,float* c,const size_t N){
     size_t idx = threadIdx.x +blockDim.x*blockIdx.x;
     size_t stride = gridDim.x*blockDim.x;
@@ -128,7 +128,7 @@ __global__ void kernel3_add_vector_layer(const float* a,const float* b,float* c,
 } 
 ```
 This is the simplest kernel here we are performing simple vector addition by assigning each element a thread and loop over the array until all elements are added.
-```
+```c
 
 __global__ void kernel4_gelu_activation_layer(float*a,const size_t N)
 {
@@ -142,7 +142,7 @@ __global__ void kernel4_gelu_activation_layer(float*a,const size_t N)
 ```
 This layer is similar to the add vector layer but instead of adding 2 vectors we loop over the vector and apply Gelu activation function to each element of the matrix
 
-```
+```c
 __global__ void transpose_kernel_layer(float* in,float* out,int w,int h)
 {
     __shared__ float tile[32][33];
@@ -166,4 +166,29 @@ This function is a little tricky because the naive version of this is very simpl
 So to allievate this we use shared memory. We can use threads to store the data and basically transverse over this shared memory in a non contiguous manner. It might look tricky at first glance I will recommend dry running this code on pen and paper for a small matrix let 6X6 with a 3X3 block and it will become much clearer.<br>
 
 One other thing is in shared memory matrix you will se we have initalized the memory with [32][33] it is to minimize bank conflicts. To go in more details in gpu the memory is stored in banks imagine it like a huge library with different sections for different genres each managed by a different librarien. Now to get a book you would have to the correct librarian, like that here each number in a matrix is given to the bank and there are 32 banks so this process works in round robin fashion so first no goes to first bank and second to second bank so and and the 33rd no goes to the first bank. So here lies the issue if we each thread needs a different row of the same column the will all hit the bank at once basically it would be like everyone asking form the librarian managing history section to get the book for differnt eras of history, a queue will form as librarian can only fetch one book at a time. So we add this offset now the rows of a same column will offset hence all threads will hit different banks.
+
+```c
+__global__ void kernel_transpose_split_heads_layer(    const float* in,
+    float* out,
+const int seq_len,
+const int n_heads,
+const int head_dim)
+{
+ int token_idx = blockIdx.x;
+ if(token_idx>=seq_len)return;
+ int tid = threadIdx.x;
+ int total_dim = n_heads*head_dim;
+ for(int i = tid;i<total_dim;i+=blockDim.x)
+ {
+    int head_idx = i/head_dim;
+    int dim_idx = i%head_dim;
+    int input_idx = token_idx*total_dim+i;
+    float val = in[input_idx];
+    int output_idx = (head_idx*seq_len*head_dim)+(token_idx*head_dim)+dim_idx;
+    out[output_idx]=val;
+
+ }
+}
+```
+So this transpose kernel is specially made to transpose the matrix so that all the values going to same head are contiguous this helps make sure when we are doing matrix multiplication around a head we don't have to make many memory calls. So how it works is instead of a normal transpose where each element is taken and transposed, here we put all elements of going to same head for each token as one element so each transpose operation is actually moving a lot more data. This also alliveates the need to have shared memory block to keep the intermediate data as each request already fills the memory bus.
 

@@ -36,12 +36,12 @@ __global__ void kernel4_gelu_activation_layer(
     const size_t N
 );
 
-__global__ void kernel_transpose_split_heads(
-    const float* input,
-    float* output,
-    int seq_len,
-    int n_heads,
-    int head_dim
+__global__ void kernel_transpose_split_heads_layer(
+    const float* in,
+    float* out,
+const int seq_len,
+const int n_heads,
+const int head_dim
 );
 
 __global__ void kernel_transpose_merge_heads(
