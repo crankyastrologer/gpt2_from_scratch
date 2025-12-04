@@ -183,3 +183,28 @@ const int head_dim)
 
  }
 }
+
+__global__ void kernel_transpose_merge_heads_layer(const float* in, float* out, int seq_len, int n_heads, int head_dim)
+{
+    int token_idx = blockIdx.x;
+    if(token_idx>=seq_len)return;
+    int tid = threadIdx.x;
+    int total_dim = n_heads*head_dim;
+    for (int i = tid; i < total_dim; i += blockDim.x) {
+        int head_idx = i / head_dim;
+        int dim_idx  = i % head_dim;
+
+        // 2. Read from Input (Planar: [Heads, Seq, Dim])
+        // We reverse the math from the previous kernel
+        int input_idx = (head_idx * seq_len * head_dim) + 
+                        (token_idx * head_dim) + 
+                        dim_idx;
+        float val = in[input_idx];
+
+        // 3. Write to Output (Row-Major: [Seq, Heads, Dim])
+        // We pack it back into a single contiguous vector
+        int output_idx = token_idx * total_dim + i;
+        
+        out[output_idx] = val;
+    }
+}

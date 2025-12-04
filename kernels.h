@@ -44,9 +44,9 @@ const int n_heads,
 const int head_dim
 );
 
-__global__ void kernel_transpose_merge_heads(
-    const float* input,
-    float* output,
+__global__ void kernel_transpose_merge_heads_layer(
+    const float* in,
+    float* out,
     int seq_len,
     int n_heads,
     int head_dim

@@ -11,6 +11,7 @@
 #define N_LAYER 12
 #define VOCAB_SIZE 50276
 #define FFN_DIM 3072
+#define HEAD_DIM 64
 
 #define cudaCheckErrors(msg) \
     do { \
@@ -29,6 +30,7 @@ int main(){
     int batch_size = 1;
     int seq_len = SEQ_LEN;
     int n_embed = N_EMBED;
+    int head_dim = HEAD_DIM;
     size_t total_tokens = batch_size * seq_len;
     size_t total_elements_embed = total_tokens * n_embed;
     size_t total_elements_ffn = total_tokens * FFN_DIM;   
@@ -85,11 +87,17 @@ float *d_layer_Wq;
     cudaMalloc(&d_Q, total_tokens * n_embed * sizeof(float));
     cudaMalloc(&d_K, total_tokens * n_embed * sizeof(float));
     cudaMalloc(&d_V, total_tokens * n_embed * sizeof(float));
+        float *d_Q_split, *d_K_split, *d_V_split;
+    cudaMalloc(&d_Q_split, total_tokens * n_embed * sizeof(float));
+    cudaMalloc(&d_K_split, total_tokens * n_embed * sizeof(float));
+    cudaMalloc(&d_V_split, total_tokens * n_embed * sizeof(float));
         cudaMalloc(&d_model_output,total_tokens*n_embed*sizeof(float));
          float *d_scores;
-    cudaMalloc(&d_scores, total_tokens * total_tokens * sizeof(float));
-    float *d_attn_output;
+size_t scores_size = (size_t)batch_size * N_HEAD * seq_len * seq_len;
+cudaMalloc(&d_scores, scores_size * sizeof(float));    float *d_attn_output;
     cudaMalloc(&d_attn_output, total_tokens * n_embed * sizeof(float));
+        float *d_attn_output_split;
+    cudaMalloc(&d_attn_output_split, total_tokens * n_embed * sizeof(float));
     float *ffn1,*ffn2,*ffh;
     cudaMalloc(&ffn1,n_embed*FFN_DIM*sizeof(float));
     cudaMalloc(&ffn2,FFN_DIM*n_embed*sizeof(float));
@@ -173,30 +181,57 @@ float *d_layer_Wq;
         );cudaDeviceSynchronize();
         // TODO: Reshape for Multi-Head
         // TODO: Launch batched cuBLAS GEMM for Q*K^T (Scores)
-       
+        int grid_trans = total_tokens;
+        kernel_transpose_split_heads_layer<<<grid_trans, BLOCK_SIZE>>>(d_Q, d_Q_split, seq_len, N_HEAD, head_dim);
+        kernel_transpose_split_heads_layer<<<grid_trans, BLOCK_SIZE>>>(d_K, d_K_split, seq_len, N_HEAD, head_dim);
+        kernel_transpose_split_heads_layer<<<grid_trans, BLOCK_SIZE>>>(d_V, d_V_split, seq_len, N_HEAD, head_dim);
+        long long stride_Q=seq_len*head_dim;
+        long long stride_K=seq_len*head_dim;
+        long long stride_Scores = seq_len*seq_len;
+        cublasSgemmStridedBatched(
+            cublas_handle,
+            CUBLAS_OP_T,
+            CUBLAS_OP_N,
+            seq_len,seq_len,
+            head_dim,
+            &alpha,
+            d_K_split,head_dim, stride_K,
+            d_Q_split, head_dim, stride_Q,
+            &beta,
+            d_scores, seq_len, stride_Scores,
+            N_HEAD
+
+
+        );
+        cudaCheckErrors("Batched Q*K^T failed");
+        
         // --- LAUNCH KERNEL 3: FUSED MASKED SOFTMAX ---
         // (This assumes a 'd_scores' buffer was calculated and has shape [B*H*S, S])
         // int grid_size_softmax = total_tokens * N_HEAD;
         // fused_masked_softmax<<<grid_size_softmax, BLOCK_SIZE>>>(d_scores, seq_len);
-        kernel2_softmax_layer<<<total_tokens, BLOCK_SIZE>>>(d_scores,total_tokens);cudaDeviceSynchronize();
+        kernel2_softmax_layer<<<N_HEAD * seq_len, BLOCK_SIZE>>>(d_scores,seq_len);cudaDeviceSynchronize();
+        cudaCheckErrors("Softmax Failed");
         // TODO: Launch batched cuBLAS GEMM for Scores * V
         // TODO: Reshape back from Multi-Head
         // TODO: Launch cuBLAS GEMM for final output projection
-        cublasSgemm(cublas_handle,
-            CUBLAS_OP_N, CUBLAS_OP_N,
-            n_embed,       // Rows of V (768)
-            total_tokens,  // Cols of Softmax (8192)
-            total_tokens,  // Shared dim (8192)
-            &alpha,
-            d_V,           // Matrix A (V)
-            n_embed,       // lda
-            d_scores,      // Matrix B (Softmax output)
-            total_tokens,  // ldb
-            &beta,
-            d_attn_output, // Result
-            n_embed        // ldc
-        );cudaDeviceSynchronize();
-        
+        long long stride_V = seq_len*head_dim;
+        long long stride_Out = seq_len*seq_len;
+        cublasSgemmStridedBatched(cublas_handle,
+        CUBLAS_OP_N, CUBLAS_OP_N,
+        head_dim,
+        seq_len,
+        seq_len,
+        &alpha,
+        d_V_split, head_dim, stride_V,
+        d_scores, seq_len, stride_Scores,
+        &beta,
+        d_attn_output_split, head_dim,stride_Out,N_HEAD
+    );
+    cudaCheckErrors("batched scores*V failed");
+    kernel_transpose_merge_heads_layer<<<grid_trans, BLOCK_SIZE>>>(d_attn_output_split, d_attn_output, seq_len, N_HEAD, head_dim);
+        cudaDeviceSynchronize();
+        cudaCheckErrors("Transpose Merge failed");
+         
         // 4. Final Projection (Output Weights)
         // Output = Attn_Output * W_o
         cublasSgemm(cublas_handle,
