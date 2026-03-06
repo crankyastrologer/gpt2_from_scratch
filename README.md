@@ -192,3 +192,16 @@ const int head_dim)
 ```
 So this transpose kernel is specially made to transpose the matrix so that all the values going to same head are contiguous this helps make sure when we are doing matrix multiplication around a head we don't have to make many memory calls. So how it works is instead of a normal transpose where each element is taken and transposed, here we put all elements of going to same head for each token as one element so each transpose operation is actually moving a lot more data. This also alliveates the need to have shared memory block to keep the intermediate data as each request already fills the memory bus.
 
+Ok so now let's focus on how all of this works together 
+First step is to do memory allocation and variable defination<br>
+along with this we will also create a cublasHandle using `cublasCreate` it is basically a selfcontained environment in which our cuda gemm functions will run
+<br>
+
+now let's put our focus on the declared variables 
+- batch_size: This ofcourse is the now of batches we want to run through.
+- seq_len: This is the seq_len for our LLM basically the context widow.
+- n_enbed: This is the dimensions of our embedding vector
+- head_dim: it is the dimension of our attention heads basically on how many dimensions of the embedding vector would each head work on
+- total_tokens, total_elements_embed: These are just the total dimension matrix of all the tokens and embedding vector in a batch
+- total_elements_ffn: it is the matrix formned by the mulitplication of the first ffnn layer and the the processed embedding vectors
+- 
