@@ -236,3 +236,58 @@ __global__ void zero_grad_kernel(float * in,const int size)
     return;
   in[idx] = 0;
 }
+
+__global__ void cross_entropy_backward_kernel(float* d_logits, const long* target,
+const int vocab_size, const int total_tokens)
+{
+    int token_idx = blockIdx.x;
+    if(token_idx>=total_tokens)return;
+    int idx = threadIdx.x;
+    long target_tok = target[token_idx];
+    __shared__ float sh_sum[256];
+    __shared__ float sh_max[256];
+    float* logit = d_logits +token_idx*vocab_size;
+    float localmax = -1e20;
+    for(int i = idx;i<vocab_size;i+=blockDim.x)
+    {
+        localmax = fmaxf(localmax,logit[i]);
+    }
+    sh_max[idx] = localmax;
+    __syncthreads();
+    for(int i = blockDim.x/2;i>0;i>>=1){
+        if(idx<i)
+        sh_max[idx] = fmaxf(sh_max[idx],sh_max[idx+i]);
+        __syncthreads();
+
+    }
+    __shared__ float max_logit;
+    if (idx == 0) max_logit = sh_max[0];
+    __syncthreads();
+    float local_sum = 0.0f;
+    for (int i = idx; i < vocab_size; i += blockDim.x) {
+        local_sum += expf(logit[i] - max_logit);
+    }
+    sh_sum[idx] = local_sum;
+    __syncthreads();
+
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (idx < s) {
+            sh_sum[idx] += sh_sum[idx + s];
+        }
+        __syncthreads();
+    }
+
+    __shared__ float sum_exp;
+    if (idx == 0) sum_exp = sh_sum[0];
+    __syncthreads();
+
+    float scale = 1.0f /(float)total_tokens;
+     for(int i = idx;i<vocab_size;i+=blockDim.x)
+     {
+        float prob = expf(logit[i]-max_logit)/sum_exp;
+        float indicator = (i== target_tok)? 1.0f:0.0f;
+        float dx = (prob-indicator)*scale;
+        logit[i] = dx;
+     }
+    
+}

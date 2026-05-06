@@ -4,6 +4,7 @@
 #include<cuda_runtime.h>
 #include<cublas_v2.h>
 #include "kernels.h"
+#include "kernels_backward.h"
 #define SEQ_LEN 1024
 #define BLOCK_SIZE 256
 #define N_EMBED 768
@@ -82,6 +83,10 @@ size_t scores_size = (size_t)batch_size * N_HEAD * seq_len * seq_len;
     cudaMalloc(&d_unembedding_matrix, n_embed * VOCAB_SIZE * sizeof(float));
     float alpha = 1.0f;
         float beta = 0.0f;
+    float * d_unembedding_matrix_grid;
+    cudaMalloc(&d_unembedding_matrix_grid, n_embed*VOCAB_SIZE*sizeof(float));
+    float * d_model_output_grad;
+    cudaMalloc(&d_model_output_grad, total_elements_embed*sizeof(float));
     printf("Memory allocated...\n");
     for(int i = 0;i<N_LAYER;i++)
     {
@@ -348,7 +353,20 @@ size_t scores_size = (size_t)batch_size * N_HEAD * seq_len * seq_len;
     );cudaDeviceSynchronize();}
     // --- 6. Copy Results Back & Cleanup ---
     printf("Forward pass complete. Freeing memory...\n");
-    
+    printf("Backward pass unembedding...\n");
+    cublasSgemm(cublas_handle,
+    CUBLAS_OP_T,CUBLAS_OP_N,
+    n_embed,total_tokens,VOCAB_SIZE,
+&alpha,
+d_unembedding_matrix, VOCAB_SIZE,
+d_logits,VOCAB_SIZE,
+&beta,
+d_model_output_grad, n_embed);
+        cudaDeviceSynchronize();
+    cudaCheckErrors("Backward Unembedding failed");
+
+    printf("Backward Pass: Final LayerNorm...\n");
+    layer_norm_backward<<<total_tokens, BLOCK_SIZE>>>()
     // Free all memory
     cudaFree(d_input_ids);
     cudaFree(d_token_embed_matrix);
@@ -385,6 +403,7 @@ size_t scores_size = (size_t)batch_size * N_HEAD * seq_len * seq_len;
      cudaFree(d_ln_ffn_gamma[i]);
     cudaFree(d_ln_ffn_beta[i]);
         cudaFree(d_scores[i]);
+    
 
     }
         for(int i = 0;i<N_LAYER*2;i++)
