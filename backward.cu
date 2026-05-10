@@ -36,6 +36,8 @@ int main(){
     size_t total_tokens = batch_size * seq_len;
     size_t total_elements_embed = total_tokens * n_embed;
     size_t total_elements_ffn = total_tokens * FFN_DIM;   
+    float* d_final_ln_input;
+    cudaMalloc(&d_final_ln_input, total_elements_embed*sizeof(float));
     cublasHandle_t cublas_handle;
     cublasCreate(&cublas_handle);
     long* h_input_ids = (long*)malloc(total_tokens * sizeof(long));
@@ -55,6 +57,9 @@ int main(){
         cudaMalloc(&d_residual_buffer[i], total_elements_embed * sizeof(float));
     
     // (Mock) LayerNorm Weights
+    float* pre_gelu_buffer[N_LAYER];
+    float* d_ffn_hidden_grad;
+    cudaMalloc(&d_ffn_hidden_grad,total_elements_ffn*sizeof(float));
     float* d_ln_attn_gamma[N_LAYER];
     float* d_ln_ffn_gamma[N_LAYER];
     float* d_ln_final_gamma;
@@ -108,6 +113,7 @@ size_t scores_size = (size_t)batch_size * N_HEAD * seq_len * seq_len;
     cudaMalloc(&ffn2[i],FFN_DIM*n_embed*sizeof(float));
     cudaMalloc(&d_scores[i], scores_size * sizeof(float));
         cudaMalloc(&ffh[i],total_tokens*FFN_DIM*sizeof(float));
+    cudaMalloc(&pre_gelu_buffer[i],n_embed*sizeof(float));
 
     }
 
@@ -330,7 +336,7 @@ size_t scores_size = (size_t)batch_size * N_HEAD * seq_len * seq_len;
     
     // --- FINAL LAYERS ---
     printf("Running Final Output Layers...\n");
-
+    cudaMemcpy(d_final_ln_input,d_model_output,total_elements_embed*sizeof(float),cudaMemcpyDeviceToDevice);
     // --- LAUNCH KERNEL 2: FINAL LAYER NORM ---
     kernel1_normalization_layer<<<total_tokens, BLOCK_SIZE>>>(
         d_model_output, d_ln_final_gamma, d_ln_final_beta, n_embed, 1e-5f
@@ -366,7 +372,77 @@ d_model_output_grad, n_embed);
     cudaCheckErrors("Backward Unembedding failed");
 
     printf("Backward Pass: Final LayerNorm...\n");
-    layer_norm_backward<<<total_tokens, BLOCK_SIZE>>>()
+    layer_norm_backward<<<total_tokens, BLOCK_SIZE>>>(d_model_output_grad,
+    d_final_ln_input, d_ln_final_gamma,d_model_output_grad,n_embed,1e-5f);
+    printf("Entering Decoder Reverse Loop...\n");
+
+for (int layer = N_LAYER - 1; layer >= 0; layer--) {
+    printf("Backward Pass: Layer %d FFN...\n", layer);
+
+    // --- 1. FFN2 Backward (Contract Layer) ---
+    // Formula: d_hidden = d_model_output_grad * (W_ffn2)^T
+    // Dimensions: [B*S, 3072] = [B*S, 768] * [768, 3072]
+    cublasSgemm(cublas_handle,
+        CUBLAS_OP_T, CUBLAS_OP_N,     
+        FFN_DIM, total_tokens, n_embed,
+        &alpha,
+        ffn2[layer], n_embed,         // Transpose of FFN2 weights
+        d_model_output_grad, n_embed, // Incoming gradient
+        &beta,
+        d_ffn_hidden_grad, FFN_DIM    // Output gradient in hidden dimension
+    );
+    cudaDeviceSynchronize();
+
+    // --- 2. GELU Backward ---
+    // Pushes d_ffn_hidden_grad through the GELU derivative
+    int grid_size_ffn = (total_elements_ffn + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    gelu_backwards_kernel<<<grid_size_ffn, BLOCK_SIZE>>>(
+        d_ffn_hidden_grad,    // d_in (We overwrite it in-place to save VRAM)
+        d_ffn_hidden_grad,    // d_out (Incoming gradient from FFN2)
+        pre_gelu_buffer[layer], // x (The saved pre-activation values)
+        total_elements_ffn
+    );
+    cudaDeviceSynchronize();
+
+    // --- 3. FFN1 Backward (Expand Layer) ---
+    // We need a temporary buffer for the gradient coming out of FFN1 before it hits LayerNorm.
+    // We can reuse a chunk of memory for this, or allocate a `d_pre_ln_grad`. 
+    // Let's assume we allocated `float* d_pre_ln_grad;` (size: total_elements_embed) at the top.
+    
+    // Formula: d_pre_ln_grad = d_hidden_grad * (W_ffn1)^T
+    cublasSgemm(cublas_handle,
+        CUBLAS_OP_T, CUBLAS_OP_N,     
+        n_embed, total_tokens, FFN_DIM,
+        &alpha,
+        ffn1[layer], FFN_DIM,         // Transpose of FFN1 weights
+        d_ffn_hidden_grad, FFN_DIM,   // Incoming gradient from GELU
+        &beta,
+        d_pre_ln_grad, n_embed        // Gradient back in model dimension!
+    );
+    cudaDeviceSynchronize();
+
+    // --- 4. Pre-FFN LayerNorm Backward ---
+    // We use the saved residual state to get the original input to this LayerNorm
+    layer_norm_backward<<<total_tokens, BLOCK_SIZE>>>(
+        d_pre_ln_grad,                 // Incoming gradient from FFN1
+        d_residual_buffer[layer*2+1],  // Original input (x) saved during forward pass
+        d_ln_ffn_gamma[layer],         // Scale parameter
+        d_pre_ln_grad,                 // Output (dx), overwriting in-place
+        n_embed,
+        1e-5f
+    );
+    cudaDeviceSynchronize();
+
+    // --- 5. Residual Add Backward (FFN Block) ---
+    // The gradient splits at a residual addition: 
+    // d_model_output_grad = d_model_output_grad + d_pre_ln_grad
+    kernel3_add_vector_layer<<<(total_elements_embed + 255) / 256, BLOCK_SIZE>>>(
+        d_model_output_grad, d_pre_ln_grad, d_model_output_grad, total_elements_embed
+    );
+    cudaDeviceSynchronize();
+
+    // ... Next up: Attention Block Backward ...
+}
     // Free all memory
     cudaFree(d_input_ids);
     cudaFree(d_token_embed_matrix);
@@ -376,7 +452,7 @@ d_model_output_grad, n_embed);
     cudaFree(d_ln_final_beta);
     cudaFree(d_logits);
     free(h_input_ids);
-    
+    cudaFree(d_final_ln_input);
     cudaFree(d_attn_output);
     cudaFree(d_attn_output_split);
     cublasDestroy(cublas_handle);

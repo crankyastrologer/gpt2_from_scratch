@@ -204,4 +204,11 @@ now let's put our focus on the declared variables
 - head_dim: it is the dimension of our attention heads basically on how many dimensions of the embedding vector would each head work on
 - total_tokens, total_elements_embed: These are just the total dimension matrix of all the tokens and embedding vector in a batch
 - total_elements_ffn: it is the matrix formned by the mulitplication of the first ffnn layer and the the processed embedding vectors
-- 
+- h_input_ids: These are the input tokens stored in the ram accessed by the cpu
+- d_input_ids: These  are the same tokens stored on the device VRAM ie the GPU
+- d_token_embed_matrix: These are the input token embedded
+- d_pos_embed_matrix: these are the input tokens with position added to them 
+- d_model_output: It is used to store the output for each layer of the model (overwritten after every layer)
+- d_residual_buffer: It stores the unchanged input that is used to add to the output for residual connections
+- d_ln_gamma & d_ln_beta: These are the weights for the normaization layers
+- d_logits: these are the final output from the model 
