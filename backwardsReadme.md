@@ -99,3 +99,48 @@ for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
     }
 }
 ```
+This is one of the most complex kernel of this architecture the layer norm backwards. It basically traces the error backwads through the layer normalization layer. This is kinda tricky because the error is not only affected by the input directly but also indirectly due to the mean and variance used in normalization. 
+
+$$\frac{\partial L}{\partial x_i} = \frac{1}{N\sigma} \left[ N \left( \frac{\partial L}{\partial y_i} \gamma_i \right) - \sum_{j=1}^N \left( \frac{\partial L}{\partial y_j} \gamma_j \right) - \hat{x}_i \sum_{j=1}^N \left( \frac{\partial L}{\partial y_j} \gamma_j \hat{x}_j \right) \right]$$
+
+This is the whole equation we are implementing in this kernel  layer 
+First we calculate the mean and standard deviation, along with normalizing the inputs for stability. As you can see there are 2 summations in this equation we calculate them seperately under s1_total and s2_total using standard parallel reduction. Finally we get our error with the last for loop.
+
+```c
+__global__ void fused_masked_softmax_backward(
+    const float* grad_output,   // Incoming gradient (dY)
+    const float* softmax_output,// Original Softmax output (S)
+    float* grad_input,          // Result (dX)
+    const int seq_len           // 1024
+)
+{
+    __shared__ float sum_val ;
+   __shared__ float sh_sum[256];
+     int idx = blockIdx.x;
+    int id = threadIdx.x;
+    int lr = idx%seq_len;
+    float local_sum=0;
+    sh_sum[id]=0;
+    for(int i = id;i<seq_len;i+=blockDim.x)
+    {
+        local_sum+=softmax_output[idx*seq_len+i]*grad_output[idx*seq_len+i];
+    }
+    sh_sum[id] = local_sum;
+    __syncthreads();
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (id < s) {
+            sh_sum[id] = sh_sum[s+id]+sh_sum[id];
+        }
+        __syncthreads(); // Sync *inside* the loop
+    }
+    if(id==0)
+        sum_val=sh_sum[0];
+    __syncthreads();
+    for(int i = id;i<seq_len;i+=blockDim.x)
+    {
+      float dx = softmax_output[idx*seq_len+i]*(grad_output[idx*seq_len+i]-sum_val)*0.125f;
+      grad_input[idx*seq_len+i] = dx;
+    }
+
+}
+```

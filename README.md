@@ -116,6 +116,82 @@ for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
  Hence, we will do a parallel reduction here in which we will use a for loop in which at each point the thread will add it's value and the value in the thread remaining_values-id. Using we will be able to calculate the sum of the array without causing a memory access bottleneck.
  2. **Calculating the variance**: Variance is calculated in a similar fashion first subtract mean from indivdual array elements and then square them before finally using parallel reduction to add them altogether.
  3. **Normalising the input**: Here we simply normalize our inputs by removing mean and dividing by standard diviation(epsilon is added to make sure there are no divide by zero erros if variance is 0 for some reason).
+ ```c
+ __global__ void kernel2_softmax_layer(float* input_scores,const int input_size){
+    __shared__ float sh[1024];
+    int idx = blockIdx.x;
+    int id = threadIdx.x;
+    int lr = idx%input_size;
+    for(int i = id;i<input_size;i+=blockDim.x)
+    {
+        if(i>lr)
+            sh[i]=-1e9;
+        else{
+            sh[i] = input_scores[idx*input_size+i]/8.0f;
+        }
+    }
+    __syncthreads();
+   __shared__ float maxs ;
+   __shared__ float l_max[256];
+   l_max[id]=-1e20f;
+    __syncthreads();
+
+   for(int i = id;i<input_size;i+=blockDim.x)
+   {
+    l_max[id] = max(sh[i],l_max[id]);
+   }
+   __syncthreads();
+   for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (id < s) {
+            l_max[id] = max(l_max[id + s],l_max[id]);
+        }
+        __syncthreads(); // Sync *inside* the loop
+    }
+    if(id==0)
+        maxs = l_max[0];
+            __syncthreads();
+
+     for(int i = id;i<input_size;i+=blockDim.x)
+    {
+      float temp = sh[i]-maxs;
+      sh[i] = expf(temp);
+    }
+    __syncthreads();
+    __shared__ float l_sum[256];
+    l_sum[id] = 0.0f;
+        __syncthreads();
+
+    for(int i = id;i<input_size;i+=blockDim.x)
+   {
+    l_sum[id] += sh[i];
+   }
+      __syncthreads();
+   __shared__ float final_s;
+   
+   for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (id < s) {
+            l_sum[id] +=l_sum[id+s];
+        }
+        __syncthreads(); // Sync *inside* the loop
+    }
+       __syncthreads();
+       if(id==0)
+    final_s=l_sum[0];
+    __syncthreads();
+
+     for(int i = id;i<input_size;i+=blockDim.x)
+   {
+        input_scores[idx*input_size+i] = sh[i]/final_s;
+   }
+ ```
+This kernel is basically a modified softmax function to better fit GPT 2 transformer architecture. The changes we made this is the normal equation:
+$$\text{Softmax}(x_i) = \frac{e^{x_i }}{\sum e^{x_j }}$$
+but we are using:
+$$\text{Softmax}(x_i) = \frac{e^{x_i - \max(x)}}{\sum e^{x_j - \max(x)}}$$
+Along with this we are also adding some other things:
+1. **Scaling**: We are dividing all values by 8 the root of the dimension so the values don't become very large.
+2. **Masking**: We are masking all the values after the query index to make sure the model can only predict from the values before the query.
+3. We are also subtracting the max value from all to make sure floating point overflow doesn't happen.
 
 ``` c
 __global__ void kernel3_add_vector_layer(const float* a,const float* b,float* c,const size_t N){
